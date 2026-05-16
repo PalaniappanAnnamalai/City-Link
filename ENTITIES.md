@@ -24,7 +24,7 @@ Raj's account is flagged as suspicious, set `enabled = false`. His data stays
 safe, he just cannot log in.
 
 ### Create table SQL
-
+```sql
 CREATE TABLE IF NOT EXISTS users (
     id              BIGINT AUTO_INCREMENT   PRIMARY KEY,
     name            VARCHAR(100)            NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at      DATETIME                NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                      ON UPDATE CURRENT_TIMESTAMP
 );
-
+```
 
 ### each column
 
@@ -98,7 +98,7 @@ Notice:
 
 
 ### Create table SQL
-
+```sql
 CREATE TABLE IF NOT EXISTS user_devices (
     id                  BIGINT AUTO_INCREMENT       PRIMARY KEY,
     user_id             BIGINT                      NOT NULL,
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS user_devices (
 
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
-
+```
 ### Why each column exists
 
 | Column | Why |
@@ -146,8 +146,10 @@ user that no longer exists.
 
 ### Why Index:
 
+```sql
 CREATE INDEX idx_devices_user_id ON user_devices(user_id);
 CREATE INDEX idx_devices_fcm     ON user_devices(fcm_token);
+```
 
 `user_id` index - every time you load the active sessions screen or send a
 push alert, you query `WHERE user_id = ?`. Without an index, MySQL scans every
