@@ -265,3 +265,131 @@ it was last used, even if the device record is gone.
 
 `user_id` which uses `ON DELETE CASCADE` — if the user is deleted, all their
 tokens are deleted too.
+
+
+------------------
+
+
+## `user_preferences`
+
+### What does it store?
+
+One row per user containing all their personal settings — notification
+preferences, app theme, language, and whether they allow location tracking.
+This is a 1:1 table with `users` — one user always has exactly one preference
+record.
+
+### Real example
+
+| id | user_id | preferred_city | email_alerts | push_alerts | sms_alerts | alert_frequency | theme | language | location_sharing |
+|----|---------|---------------|--------------|-------------|------------|-----------------|-------|----------|-----------------|
+| 1 | 1 | Wellington | true | true | false | INSTANT | DARK | en | true |
+| 2 | 2 | Auckland | true | false | false | DAILY | SYSTEM | mi | false |
+
+Raj gets instant push alerts in dark mode. Sarah gets a daily email digest
+in Te Reo Maori.
+
+### Create table SQL
+
+```sql
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id               BIGINT AUTO_INCREMENT             PRIMARY KEY,
+    user_id          BIGINT                            NOT NULL UNIQUE,
+    preferred_city   VARCHAR(50),
+    email_alerts     BOOLEAN                           NOT NULL DEFAULT TRUE,
+    push_alerts      BOOLEAN                           NOT NULL DEFAULT TRUE,
+    sms_alerts       BOOLEAN                           NOT NULL DEFAULT FALSE,
+    alert_frequency  ENUM('INSTANT','HOURLY','DAILY')  NOT NULL DEFAULT 'INSTANT',
+    theme            ENUM('LIGHT','DARK','SYSTEM')      NOT NULL DEFAULT 'SYSTEM',
+    language         VARCHAR(10)                       NOT NULL DEFAULT 'en',
+    updated_at       DATETIME                          NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                                                ON UPDATE CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+### Why each column exists
+
+| Column | Why |
+|--------|-----|
+| `user_id` | FK to `users.id` with `UNIQUE` — this single constraint enforces the 1:1 relationship |
+| `preferred_city` | Overrides `users.city` for the dashboard. If null falls back to `users.city` |
+| `email_alerts` | Master toggle for all email notifications |
+| `push_alerts` | Master toggle for Firebase push to Android/iOS — checked before sending any push |
+| `sms_alerts` | SMS alerts toggle — defaults false, future feature |
+| `alert_frequency` | INSTANT = notify immediately, HOURLY = batch, DAILY = one digest per day |
+| `theme` | LIGHT, DARK, or SYSTEM. Angular reads this on login and applies it immediately |
+| `language` | `en` = English, `mi` = Te Reo Maori. NZ-specific — shows cultural awareness |
+| `updated_at` | Refreshed on every settings save — useful for support and audit |
+
+### Why a separate table and not columns on `users`?
+
+Two reasons. First, preferences change far more often than identity data — a
+user might toggle dark mode several times a day. Separating them means a
+settings update never touches the `users` row. Second, it keeps `users` lean
+and focused on identity only.
+
+-------------------
+
+## `user_sessions`
+
+### What does it store?
+
+One row per login event. Every time a user logs in — on any device or browser
+— a new row is created here. It is your security audit trail and powers the
+"active sessions" screen.
+
+### Real example
+
+| id | user_id | device_id | ip_address | platform | login_at | logout_at |
+|----|---------|-----------|------------|----------|----------|-----------|
+| 1 | 1 | 1 | 203.118.42.5 | ANDROID | 2026-03-01 08:00 | null |
+| 2 | 1 | 2 | 203.118.42.5 | WEB | 2026-05-10 09:00 | 2026-05-10 17:30 |
+| 3 | 1 | null | 185.220.101.9 | WEB | 2026-05-15 02:14 | null |
+
+Row 1 — Android session, still active (logout_at is null).
+Row 2 — Browser session, cleanly logged out same day.
+Row 3 — Login from a completely different IP at 2am — this triggers the
+"new login detected" security alert. device_id is null because browsers
+do not always have a registered device row.
+
+### Create table SQL
+
+```sql
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id           BIGINT AUTO_INCREMENT           PRIMARY KEY,
+    user_id      BIGINT                          NOT NULL,
+    device_id    BIGINT,
+    ip_address   VARCHAR(45)                     NOT NULL,
+    user_agent   VARCHAR(500),
+    platform     ENUM('WEB','ANDROID','IOS')     NOT NULL,
+    login_at     DATETIME                        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME                        NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                                          ON UPDATE CURRENT_TIMESTAMP,
+    logout_at    DATETIME,
+
+    FOREIGN KEY (user_id)   REFERENCES users(id)        ON DELETE CASCADE,
+    FOREIGN KEY (device_id) REFERENCES user_devices(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_sessions_user_id  ON user_sessions(user_id);
+CREATE INDEX idx_sessions_login_at ON user_sessions(login_at);
+```
+
+### Why each column exists
+
+| Column | Why |
+|--------|-----|
+| `user_id` | Which user logged in |
+| `device_id` | Which registered device — nullable for browser logins with no device row |
+| `ip_address` | IP of the login. VARCHAR(45) covers both IPv4 and full IPv6 addresses |
+| `user_agent` | Raw browser or app string — e.g. `CityPulse-Android/1.0.3`. Nullable in case it is missing |
+| `platform` | WEB, ANDROID, IOS — cleaner than parsing user_agent every time |
+| `login_at` | When the session started. Set once, never changed |
+| `last_seen_at` | Updated on every API call in this session — shows if session is still being used |
+| `logout_at` | NULL = session still active. Set on clean logout. Stays NULL if token simply expires |
+
+
+
+---------------------------
