@@ -176,3 +176,92 @@ id=2  Sarah Chen         id=4  user_id=2  Samsung A54   ANDROID
 One user can own many devices.
 Each device row has `user_id` pointing back to its owner.
 If the user is deleted, all their device rows are deleted automatically.
+
+
+
+## `refresh_tokens`
+
+### What does it store?
+
+One row per refresh token issued. Every time a user logs in on a device, a
+refresh token is created here. It is the key that lets users stay logged in
+without re-entering their password.
+
+### Real example
+
+Raj is logged in on two devices:
+
+| id | user_id | device_id | client_type | expires_at | revoked | revoke_reason |
+|----|---------|-----------|-------------|------------|---------|---------------|
+| 1 | 1 | 1 | ANDROID | 2026-08-14 | false | null |
+| 2 | 1 | 2 | WEB | 2026-05-24 | false | null |
+| 3 | 1 | 1 | ANDROID | 2026-02-01 | true | LOGOUT |
+
+Row 3 is Raj's old token from when he logged out in February — kept for audit
+trail, not deleted. Row 1 is his current Android token (90 days). Row 2 is
+his browser token (7 days).
+
+### How it works day to day
+
+```
+Raj opens the Android app after 2 hours
+  → access token (JWT) has expired
+  → app sends: POST /api/auth/refresh  { token: "abc123..." }
+  → Spring checks:  token exists? YES
+                    revoked?      NO
+                    expired?      NO
+  → issues new access token (60 min)
+  → updates last_used_at to NOW()
+  → Raj sees the dashboard — never asked for password
+```
+
+### Create table SQL
+
+```sql
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id            BIGINT AUTO_INCREMENT        PRIMARY KEY,
+    user_id       BIGINT                       NOT NULL,
+    device_id     BIGINT,
+    token         VARCHAR(512)                 NOT NULL UNIQUE,
+    client_type   ENUM('WEB','ANDROID','IOS')  NOT NULL,
+    expires_at    DATETIME                     NOT NULL,
+    revoked       BOOLEAN                      NOT NULL DEFAULT FALSE,
+    revoke_reason VARCHAR(50),
+    created_at    DATETIME                     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at  DATETIME,
+
+    FOREIGN KEY (user_id)   REFERENCES users(id)        ON DELETE CASCADE,
+    FOREIGN KEY (device_id) REFERENCES user_devices(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+CREATE INDEX idx_refresh_tokens_token   ON refresh_tokens(token);
+```
+
+### Why each column exists
+
+| Column | Why |
+|--------|-----|
+| `user_id` | Which user this token belongs to |
+| `device_id` | Which device issued this token — nullable because web sessions may not have a device row |
+| `token` | Long random string (256-bit). `UNIQUE` ensures no two tokens are ever the same |
+| `client_type` | Spring reads this to set expiry — WEB=7 days, ANDROID/IOS=90 days |
+| `expires_at` | Hard expiry — even if not revoked, token is dead after this datetime |
+| `revoked` | TRUE = token is invalid. Checked on every refresh request before anything else |
+| `revoke_reason` | Why it was killed — `LOGOUT`, `EXPIRED`, `SECURITY_BREACH`, `NEW_LOGIN` |
+| `created_at` | When this token was first issued |
+| `last_used_at` | Updated every time token is used — shows active vs abandoned tokens |
+
+### Why `ON DELETE SET NULL` for device_id?
+
+```sql
+FOREIGN KEY (device_id) REFERENCES user_devices(id) ON DELETE SET NULL
+```
+
+If a device row is deleted, `device_id` becomes null but the token row stays.
+This preserves the audit trail -> you can still see the token existed and when
+it was last used, even if the device record is gone.
+
+
+`user_id` which uses `ON DELETE CASCADE` — if the user is deleted, all their
+tokens are deleted too.
