@@ -393,3 +393,108 @@ CREATE INDEX idx_sessions_login_at ON user_sessions(login_at);
 
 
 ---------------------------
+
+
+## `password_reset_tokens`
+
+### What does it store?
+
+One row per password reset request. Every time a user clicks "Forgot
+password?" a new row is created with a 6-digit OTP (One Time Password)
+that gets emailed to them as a plain code — never in a URL.
+
+### Why OTP instead of a URL token?
+
+A URL token exposes the credential in browser history, server logs, and
+referrer headers. A 6-digit OTP is typed manually into a form and submitted
+via POST body — it never appears in any URL, ever. This is the same approach
+NZ banks like ANZ and ASB use.
+
+The OTP itself is never stored — only its SHA-256 hash is saved. Even if
+the database is breached, the attacker cannot reverse the hash back to
+the 6-digit code.
+
+### How the full flow works
+
+```
+1. User clicks "Forgot password?" and enters their email
+2. Spring generates a 6-digit OTP e.g. 847291
+3. Spring SHA-256 hashes it → saves the hash here with 15 min expiry
+4. Spring emails the plain code
+
+   Subject: CityPulse password reset
+   Your reset code is: 847291
+   This code expires in 15 minutes.
+   Never share this code with anyone.
+
+5. User opens Angular reset page manually or via plain link
+6. User types: email + 847291 + new password + confirm password
+7. Angular: POST /api/auth/reset-password
+   body: { email: "raj@gmail.com", otp: "847291", newPassword: "..." }
+8. Spring hashes submitted OTP → compares to stored otp_hash → match
+9. Spring updates users.password with BCrypt hash of new password
+10. Spring sets used=TRUE, used_at=NOW()
+11. User logs in with new password — OTP never appeared in any URL
+```
+
+### Real example
+
+| id | user_id | otp_hash | expires_at | used | used_at |
+|----|---------|----------|------------|------|---------|
+| 1 | 1 | e3b0c442... | 2026-05-16 09:15 | true | 2026-05-16 09:08 |
+| 2 | 1 | a87ff679... | 2026-05-16 10:30 | false | null |
+
+Row 1 — used and consumed. The hash is stored, never the plain OTP.
+Row 2 — currently active, 15 minutes not yet passed.
+
+### Create table SQL
+
+```sql
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         BIGINT AUTO_INCREMENT  PRIMARY KEY,
+    user_id    BIGINT                 NOT NULL,
+    otp_hash   VARCHAR(255)           NOT NULL,
+    expires_at DATETIME               NOT NULL,
+    used       BOOLEAN                NOT NULL DEFAULT FALSE,
+    created_at DATETIME               NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    used_at    DATETIME,
+
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_prt_user_id ON password_reset_tokens(user_id);
+```
+
+### Why each column exists
+
+| Column | Why |
+|--------|-----|
+| `user_id` | Which user requested the reset |
+| `otp_hash` | SHA-256 hash of the 6-digit OTP. Raw OTP is never stored anywhere |
+| `expires_at` | 15 minutes from creation — short window limits attack surface |
+| `used` | TRUE once consumed — prevents reusing the same OTP twice |
+| `created_at` | When reset was requested — used for rate limiting (max 3 per hour per user) |
+| `used_at` | When OTP was consumed — useful for support and audit trail |
+
+---
+
+## 6 tables connection
+
+```
+users (1)
+  │
+  ├── (many)  user_devices    one user, many devices
+  │               │
+  │               ├── (many)  refresh_tokens    one device, many refesh_tokens
+  │               └── (many)  user_sessions     one device, many user_sessions
+  │
+  ├── (1)     user_preferences       one user, one settings record
+  ├── (many)  refresh_tokens         all tokens across all devices
+  ├── (many)  user_sessions          all sessions across all devices
+  └── (many)  password_reset_tokens  all reset attempts
+```
+
+All foreign keys use ON DELETE CASCADE — deleting a user automatically
+cleans up every row across all 6 tables. No orphaned data ever.
+
+---
